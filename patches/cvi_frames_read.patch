@@ -1,0 +1,245 @@
+diff --git a/modules/highgui/include/opencv2/highgui/highgui.hpp b/modules/highgui/include/opencv2/highgui/highgui.hpp
+index f431159..56efbd8 100644
+--- a/modules/highgui/include/opencv2/highgui/highgui.hpp
++++ b/modules/highgui/include/opencv2/highgui/highgui.hpp
+@@ -87,6 +87,9 @@ public:
+ 
+     VideoCapture& operator>>(Mat& bgr_image);
+ 
++    std::pair<void*, void*> capture(Mat& image);
++    void releaseImagePtr();
++
+     bool set(int propId, double value);
+ 
+     double get(int propId) const;
+diff --git a/modules/highgui/src/capture_cvi.cpp b/modules/highgui/src/capture_cvi.cpp
+index bcc475f..a2b4549 100644
+--- a/modules/highgui/src/capture_cvi.cpp
++++ b/modules/highgui/src/capture_cvi.cpp
+@@ -2647,12 +2647,16 @@ public:
+ 
+     int start_streaming();
+ 
+-    int read_frame(unsigned char* bgrdata);
++    int read_frame(unsigned char* bgrdata, bool retain_image_ptr);
+ 
+     int stop_streaming();
+ 
+     int close();
+ 
++    void* getImagePtr();
++    void* getOriginalImagePtr();
++    void releaseImagePtr(); //will release image_ptr as well as original_image_ptr
++
+ public:
+     int crop_width;
+     int crop_height;
+@@ -2709,6 +2713,10 @@ public:
+     VPSS_CHN VpssChn = VPSS_CHN0;
+     VIDEO_FRAME_INFO_S stFrameInfo_bgr;
+ 
++private:
++    void* image_ptr;
++    void* original_image_ptr;
++
+ };
+ 
+ capture_cvi_impl::capture_cvi_impl()
+@@ -2760,6 +2768,8 @@ capture_cvi_impl::capture_cvi_impl()
+     VpssGrp = 0;
+     // VpssGrp = CVI_VPSS_GetAvailableGrp();
+     VpssChn = VPSS_CHN0;
++    image_ptr = nullptr;
++    original_image_ptr = nullptr;
+ }
+ 
+ capture_cvi_impl::~capture_cvi_impl()
+@@ -3643,7 +3653,7 @@ OUT:
+     return ret_val;
+ }
+ 
+-int capture_cvi_impl::read_frame(unsigned char* bgrdata)
++int capture_cvi_impl::read_frame(unsigned char* bgrdata, bool retain_image_ptr)
+ {
+     int ret_val = 0;
+ 
+@@ -3791,6 +3801,11 @@ OUT:
+ 
+     if (b_vpss_frame_got)
+     {
++        if (retain_image_ptr)
++        {
++            image_ptr = new VIDEO_FRAME_INFO_S;
++            memcpy(image_ptr, &stFrameInfo_bgr, sizeof(VIDEO_FRAME_INFO_S));
++        }
+         CVI_S32 ret = CVI_VPSS_ReleaseChnFrame(VpssGrp, VpssChn, &stFrameInfo_bgr);
+         if (ret != CVI_SUCCESS)
+         {
+@@ -3816,6 +3831,44 @@ OUT:
+     return ret_val;
+ }
+ 
++void* capture_cvi_impl::getImagePtr() {
++    return image_ptr;
++}
++
++void* capture_cvi_impl::getOriginalImagePtr() {
++    return original_image_ptr;
++}
++
++void capture_cvi_impl::releaseImagePtr() {
++    if(image_ptr) {
++        free(image_ptr);
++        image_ptr = nullptr;
++    }
++    if(original_image_ptr) {
++        free(original_image_ptr);
++        original_image_ptr = nullptr;
++    }
++}
++
++void* capture_cvi_impl::getImagePtr() {
++    return image_ptr;
++}
++
++void* capture_cvi_impl::getOriginalImagePtr() {
++    return original_image_ptr;
++}
++
++void capture_cvi_impl::releaseImagePtr() {
++    if(image_ptr) {
++        free(image_ptr);
++        image_ptr = nullptr;
++    }
++    if(original_image_ptr) {
++        free(original_image_ptr);
++        original_image_ptr = nullptr;
++    }
++}
++
+ int capture_cvi_impl::stop_streaming()
+ {
+     int ret_val = 0;
+@@ -4235,9 +4288,20 @@ int capture_cvi::start_streaming()
+     return d->start_streaming();
+ }
+ 
+-int capture_cvi::read_frame(unsigned char* bgrdata)
+-{
+-    return d->read_frame(bgrdata);
++int capture_cvi::read_frame(unsigned char* bgrdata, bool retain_image_ptr) {
++    return d->read_frame(bgrdata, retain_image_ptr);
++}
++
++void* capture_cvi::getImagePtr() {
++    return d->getImagePtr();
++}
++
++void* capture_cvi::getOriginalImagePtr() {
++    return d->getOriginalImagePtr();
++}
++
++void capture_cvi::releaseImagePtr() {
++    d->releaseImagePtr();
+ }
+ 
+ int capture_cvi::stop_streaming()
+diff --git a/modules/highgui/src/capture_cvi.h b/modules/highgui/src/capture_cvi.h
+index e112912..0d31142 100644
+--- a/modules/highgui/src/capture_cvi.h
++++ b/modules/highgui/src/capture_cvi.h
+@@ -38,14 +38,20 @@ public:
+ 
+     int start_streaming();
+ 
+-    int read_frame(unsigned char* bgrdata);
++    int read_frame(unsigned char* bgrdata, bool retain_image_ptr);
+ 
+     int stop_streaming();
+ 
+     int close();
+ 
++    void* getImagePtr();
++    void* getOriginalImagePtr();
++    void releaseImagePtr();
++
+ private:
+     capture_cvi_impl* const d;
++    void* image_ptr;
++    void* original_image_ptr;
+ };
+ 
+ } // namespace cv
+diff --git a/modules/highgui/src/videocapture.cpp b/modules/highgui/src/videocapture.cpp
+index 7e33b03..531ffaf 100644
+--- a/modules/highgui/src/videocapture.cpp
++++ b/modules/highgui/src/videocapture.cpp
+@@ -239,6 +239,59 @@ void VideoCapture::release()
+     d->fps = 30;
+ }
+ 
++std::pair<void*, void*> VideoCapture::capture(Mat& image) {
++    if (!d->is_opened)
++        return {};
++
++#if CV_WITH_AW
++    if (capture_v4l2_aw_isp::supported())
++    {
++        image.create(d->height, d->width, CV_8UC3);
++
++        d->cap_v4l2_aw_isp.read_frame((unsigned char*)image.data);
++    }
++    else
++#endif
++#if CV_WITH_RK
++    if (capture_v4l2_rk_aiq::supported())
++    {
++        image.create(d->height, d->width, CV_8UC3);
++
++        d->cap_v4l2_rk_aiq.read_frame((unsigned char*)image.data);
++    }
++    else
++#endif
++#if CV_WITH_CVI
++    if (capture_cvi::supported())
++    {
++        image.create(d->height, d->width, CV_8UC3);
++        d->cap_cvi.read_frame((unsigned char*)image.data, true);
++        void* image_ptr = d->cap_cvi.getImagePtr();
++        void* original_image_ptr = d->cap_cvi.getOriginalImagePtr();
++        return std::make_pair(image_ptr, original_image_ptr);
++    }
++    else
++#endif
++#if defined __linux__
++    if (capture_v4l2::supported())
++    {
++        image.create(d->height, d->width, CV_8UC3);
++
++        d->cap_v4l2.read_frame((unsigned char*)image.data);
++    }
++    else
++#endif
++    {
++    }
++    return {};
++}
++
++void VideoCapture::releaseImagePtr() {
++    return d->cap_cvi.releaseImagePtr();
++}
++
++
++
+ VideoCapture& VideoCapture::operator>>(Mat& image)
+ {
+     if (!d->is_opened)
+@@ -267,7 +320,7 @@ VideoCapture& VideoCapture::operator>>(Mat& image)
+     {
+         image.create(d->height, d->width, CV_8UC3);
+ 
+-        d->cap_cvi.read_frame((unsigned char*)image.data);
++        d->cap_cvi.read_frame((unsigned char*)image.data, false);
+     }
+     else
+ #endif
