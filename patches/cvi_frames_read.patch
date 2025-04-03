@@ -1,0 +1,449 @@
+diff --git a/modules/highgui/include/opencv2/highgui/highgui.hpp b/modules/highgui/include/opencv2/highgui/highgui.hpp
+index f431159..334f0e1 100644
+--- a/modules/highgui/include/opencv2/highgui/highgui.hpp
++++ b/modules/highgui/include/opencv2/highgui/highgui.hpp
+@@ -28,7 +28,8 @@ enum
+ 
+ enum
+ {
+-    CV_IMWRITE_JPEG_QUALITY     = 1
++    CV_IMWRITE_JPEG_QUALITY     = 1,
++    CV_IMWRITE_WEBP_QUALITY     = 64,
+ };
+ 
+ enum
+@@ -49,7 +50,8 @@ enum ImreadModes
+ 
+ enum ImwriteFlags
+ {
+-    IMWRITE_JPEG_QUALITY        = 1
++    IMWRITE_JPEG_QUALITY        = 1,
++    IMWRITE_WEBP_QUALITY        = 64,
+ };
+ 
+ enum VideoCaptureProperties
+@@ -87,12 +89,17 @@ public:
+ 
+     VideoCapture& operator>>(Mat& bgr_image);
+ 
++    //added by jj
++    std::pair<void*, void*> capture(Mat& image);
++    void releaseImagePtr();
++
+     bool set(int propId, double value);
+ 
+     double get(int propId) const;
+ 
+ private:
+     VideoCaptureImpl* const d;
++    
+ };
+ 
+ class VideoWriterImpl;
+@@ -119,4 +126,4 @@ protected:
+ 
+ } // namespace cv
+ 
+-#endif // OPENCV_HIGHGUI_HPP
++#endif // OPENCV_HIGHGUI_HPP
+\ No newline at end of file
+diff --git a/modules/highgui/src/capture_cvi.cpp b/modules/highgui/src/capture_cvi.cpp
+index bcc475f..847878c 100644
+--- a/modules/highgui/src/capture_cvi.cpp
++++ b/modules/highgui/src/capture_cvi.cpp
+@@ -696,6 +696,19 @@ typedef struct _VIDEO_FRAME_INFO_S {
+     CVI_U32 u32PoolId;
+ } VIDEO_FRAME_INFO_S;
+ 
++typedef enum _VI_DUMP_TYPE_E {
++   VI_DUMP_TYPE_RAW = 0,
++   VI_DUMP_TYPE_YUV = 1,
++   VI_DUMP_TYPE_IR = 2,
++   VI_DUMP_TYPE_BUTT
++} VI_DUMP_TYPE_E;
++
++typedef struct _VI_DUMP_ATTR_S {
++   CVI_BOOL bEnable; /* RW;Whether dump is enable */
++   CVI_U32 u32Depth; /* RW;Range [0,8];Depth */
++   VI_DUMP_TYPE_E enDumpType;
++} VI_DUMP_ATTR_S;
++
+ typedef CVI_S32 (*PFN_CVI_VI_SetDevAttr)(VI_DEV ViDev, const VI_DEV_ATTR_S *pstDevAttr);
+ typedef CVI_S32 (*PFN_CVI_VI_EnableDev)(VI_DEV ViDev);
+ typedef CVI_S32 (*PFN_CVI_VI_DisableDev)(VI_DEV ViDev);
+@@ -711,7 +724,10 @@ typedef CVI_S32 (*PFN_CVI_VI_EnableChn)(VI_PIPE ViPipe, VI_CHN ViChn);
+ typedef CVI_S32 (*PFN_CVI_VI_DisableChn)(VI_PIPE ViPipe, VI_CHN ViChn);
+ typedef CVI_S32 (*PFN_CVI_VI_SetChnCrop)(VI_PIPE ViPipe, VI_CHN ViChn, const VI_CROP_INFO_S  *pstCropInfo);
+ typedef CVI_S32 (*PFN_CVI_VI_GetChnFrame)(VI_PIPE ViPipe, VI_CHN ViChn, VIDEO_FRAME_INFO_S *pstFrameInfo, CVI_S32 s32MilliSec);
++typedef CVI_S32 (*PFN_CVI_VI_GetPipeFrame)(VI_PIPE ViPipe, VIDEO_FRAME_INFO_S *pstFrameInfo, CVI_S32 s32MilliSec);
++typedef CVI_S32 (*PFN_CVI_VI_SetPipeDumpAttr)(VI_PIPE ViPipe, const VI_DUMP_ATTR_S *pstDumpAttr);
+ typedef CVI_S32 (*PFN_CVI_VI_ReleaseChnFrame)(VI_PIPE ViPipe, VI_CHN ViChn, const VIDEO_FRAME_INFO_S *pstFrameInfo);
++typedef CVI_S32 (*PFN_CVI_VI_ReleasePipeFrame)(VI_PIPE ViPipe, const VIDEO_FRAME_INFO_S *pstVideoFrame);
+ }
+ 
+ extern "C"
+@@ -806,6 +822,7 @@ typedef CVI_S32 (*PFN_CVI_VPSS_EnableChn)(VPSS_GRP VpssGrp, VPSS_CHN VpssChn);
+ typedef CVI_S32 (*PFN_CVI_VPSS_GetChnAttr)(VPSS_GRP VpssGrp, VPSS_CHN VpssChn, VPSS_CHN_ATTR_S* pstChnAttr);
+ typedef CVI_S32 (*PFN_CVI_VPSS_GetChnFrame)(VPSS_GRP VpssGrp, VPSS_CHN VpssChn, VIDEO_FRAME_INFO_S* pstVideoFrame, CVI_S32 s32MilliSec);
+ typedef CVI_S32 (*PFN_CVI_VPSS_ReleaseChnFrame)(VPSS_GRP VpssGrp, VPSS_CHN VpssChn, const VIDEO_FRAME_INFO_S* pstVideoFrame);
++typedef CVI_S32 (*PFN_CVI_VI_ReleasePipeFrame)(VI_PIPE ViPipe, const VIDEO_FRAME_INFO_S *pstVideoFrame);
+ typedef CVI_S32 (*PFN_CVI_VPSS_ResetGrp)(VPSS_GRP VpssGrp);
+ typedef CVI_S32 (*PFN_CVI_VPSS_SendFrame)(VPSS_GRP VpssGrp, const VIDEO_FRAME_INFO_S* pstVideoFrame, CVI_S32 s32MilliSec);
+ typedef CVI_S32 (*PFN_CVI_VPSS_SetChnAttr)(VPSS_GRP VpssGrp, VPSS_CHN VpssChn, const VPSS_CHN_ATTR_S* pstChnAttr);
+@@ -840,7 +857,10 @@ static PFN_CVI_VI_EnableChn CVI_VI_EnableChn = 0;
+ static PFN_CVI_VI_DisableChn CVI_VI_DisableChn = 0;
+ static PFN_CVI_VI_SetChnCrop CVI_VI_SetChnCrop = 0;
+ static PFN_CVI_VI_GetChnFrame CVI_VI_GetChnFrame = 0;
++static PFN_CVI_VI_GetPipeFrame CVI_VI_GetPipeFrame = 0;
++static PFN_CVI_VI_SetPipeDumpAttr CVI_VI_SetPipeDumpAttr = 0;
+ static PFN_CVI_VI_ReleaseChnFrame CVI_VI_ReleaseChnFrame = 0;
++static PFN_CVI_VI_ReleasePipeFrame CVI_VI_ReleasePipeFrame = 0;
+ 
+ static PFN_CVI_VPSS_AttachVbPool CVI_VPSS_AttachVbPool = 0;
+ static PFN_CVI_VPSS_CreateGrp CVI_VPSS_CreateGrp = 0;
+@@ -924,7 +944,10 @@ static int unload_vpu_library()
+     CVI_VI_DisableChn = 0;
+     CVI_VI_SetChnCrop = 0;
+     CVI_VI_GetChnFrame = 0;
++    CVI_VI_GetPipeFrame = 0;
++    CVI_VI_SetPipeDumpAttr = 0;
+     CVI_VI_ReleaseChnFrame = 0;
++    CVI_VI_ReleasePipeFrame = 0;
+ 
+     CVI_VPSS_AttachVbPool = 0;
+     CVI_VPSS_CreateGrp = 0;
+@@ -1061,7 +1084,10 @@ static int load_vpu_library()
+     CVI_VI_DisableChn = (PFN_CVI_VI_DisableChn)dlsym(libvpu, "CVI_VI_DisableChn");
+     CVI_VI_SetChnCrop = (PFN_CVI_VI_SetChnCrop)dlsym(libvpu, "CVI_VI_SetChnCrop");
+     CVI_VI_GetChnFrame = (PFN_CVI_VI_GetChnFrame)dlsym(libvpu, "CVI_VI_GetChnFrame");
++    CVI_VI_GetPipeFrame = (PFN_CVI_VI_GetPipeFrame)dlsym(libvpu, "CVI_VI_GetPipeFrame");
++    CVI_VI_SetPipeDumpAttr = (PFN_CVI_VI_SetPipeDumpAttr)dlsym(libvpu, "CVI_VI_SetPipeDumpAttr");
+     CVI_VI_ReleaseChnFrame = (PFN_CVI_VI_ReleaseChnFrame)dlsym(libvpu, "CVI_VI_ReleaseChnFrame");
++    CVI_VI_ReleasePipeFrame = (PFN_CVI_VI_ReleasePipeFrame)dlsym(libvpu, "CVI_VI_ReleasePipeFrame");
+ 
+     CVI_VPSS_AttachVbPool = (PFN_CVI_VPSS_AttachVbPool)dlsym(libvpu, "CVI_VPSS_AttachVbPool");
+     CVI_VPSS_CreateGrp = (PFN_CVI_VPSS_CreateGrp)dlsym(libvpu, "CVI_VPSS_CreateGrp");
+@@ -1874,6 +1900,7 @@ static int load_sns_obj_library()
+     else if (device_model == 3)
+     {
+         // licheerv nano
++        #ifdef SENSOR_GCORE_GC4653
+         libsns_obj = dlopen("libsns_gc4653.so", RTLD_LOCAL | RTLD_NOW);
+         if (!libsns_obj)
+         {
+@@ -1884,8 +1911,20 @@ static int load_sns_obj_library()
+             fprintf(stderr, "%s\n", dlerror());
+             goto OUT;
+         }
+-
+         pstSnsObj = (ISP_SNS_OBJ_S*)dlsym(libsns_obj, "stSnsGc4653_Obj");
++        #else
++        libsns_obj = dlopen("libsns_os04a10.so", RTLD_LOCAL | RTLD_NOW);
++        if (!libsns_obj)
++        {
++            libsns_obj = dlopen("/mnt/system/lib/libsns_os04a10.so", RTLD_LOCAL | RTLD_NOW);
++        }
++        if (!libsns_obj)
++        {
++            fprintf(stderr, "%s\n", dlerror());
++            goto OUT;
++        }
++        pstSnsObj = (ISP_SNS_OBJ_S*)dlsym(libsns_obj, "stSnsOs04a10_Obj");
++        #endif
+     }
+     else
+     {
+@@ -2547,7 +2586,7 @@ static const struct sns_ini_cfg* get_sns_ini_cfg()
+             4,  // bus_id
+             29, // sns_i2c_addr
+             0,  // mipi_dev
+-            {2, 1, 0, -1, -1},  // lane_id
++            {4, 3, 2, -1, -1},  // lane_id
+             {0, 0, 0, 0, 0},    // pn_swap
+             true,   // mclk_en
+             0       // mclk
+@@ -2647,12 +2686,17 @@ public:
+ 
+     int start_streaming();
+ 
+-    int read_frame(unsigned char* bgrdata);
++    int read_frame(unsigned char* bgrdata, bool retain_image_ptr);
+ 
+     int stop_streaming();
+ 
+     int close();
+ 
++    //added by jj
++    void* getImagePtr();
++    void* getOriginalImagePtr();
++    void releaseImagePtr(); //will release image_ptr as well as original_image_ptr
++
+ public:
+     int crop_width;
+     int crop_height;
+@@ -2703,12 +2747,17 @@ public:
+     int b_vpss_vbpool_attached = 0;
+     int b_vpss_grp_started = 0;
+     int b_vpss_frame_got = 0;
++    int b_vi_pipe_frame_got = 0;
+ 
+     VPSS_GRP VpssGrp = 0;
+     // VPSS_GRP VpssGrp = CVI_VPSS_GetAvailableGrp();
+     VPSS_CHN VpssChn = VPSS_CHN0;
+     VIDEO_FRAME_INFO_S stFrameInfo_bgr;
+ 
++private:
++    //added by jj
++    void* image_ptr;
++    void* original_image_ptr;
+ };
+ 
+ capture_cvi_impl::capture_cvi_impl()
+@@ -2760,6 +2809,9 @@ capture_cvi_impl::capture_cvi_impl()
+     VpssGrp = 0;
+     // VpssGrp = CVI_VPSS_GetAvailableGrp();
+     VpssChn = VPSS_CHN0;
++    //added by jj
++    image_ptr = nullptr;
++    original_image_ptr = nullptr;
+ }
+ 
+ capture_cvi_impl::~capture_cvi_impl()
+@@ -3643,7 +3695,8 @@ OUT:
+     return ret_val;
+ }
+ 
+-int capture_cvi_impl::read_frame(unsigned char* bgrdata)
++//modified by jj
++int capture_cvi_impl::read_frame(unsigned char* bgrdata, bool retain_image_ptr)
+ {
+     int ret_val = 0;
+ 
+@@ -3656,8 +3709,12 @@ int capture_cvi_impl::read_frame(unsigned char* bgrdata)
+             ret_val = -1;
+             goto OUT;
+         }
+-
+         b_vi_frame_got = 1;
++        if (retain_image_ptr)
++        {
++            original_image_ptr = new VIDEO_FRAME_INFO_S;
++            memcpy(original_image_ptr, &stFrameInfo, sizeof(VIDEO_FRAME_INFO_S));
++        } 
+     }
+ 
+     if (0)
+@@ -3791,6 +3848,12 @@ OUT:
+ 
+     if (b_vpss_frame_got)
+     {
++        //added by jj
++        if (retain_image_ptr)
++        {
++            image_ptr = new VIDEO_FRAME_INFO_S;
++            memcpy(image_ptr, &stFrameInfo_bgr, sizeof(VIDEO_FRAME_INFO_S));
++        }
+         CVI_S32 ret = CVI_VPSS_ReleaseChnFrame(VpssGrp, VpssChn, &stFrameInfo_bgr);
+         if (ret != CVI_SUCCESS)
+         {
+@@ -3812,10 +3875,29 @@ OUT:
+ 
+         b_vi_frame_got = 0;
+     }
+-
+     return ret_val;
+ }
+ 
++//added by jj
++void* capture_cvi_impl::getImagePtr() {
++    return image_ptr;
++}
++
++void* capture_cvi_impl::getOriginalImagePtr() {
++    return original_image_ptr;
++}
++
++void capture_cvi_impl::releaseImagePtr() {
++    if(image_ptr) {
++        free(image_ptr);
++        image_ptr = nullptr;
++    }
++    if(original_image_ptr) {
++        free(original_image_ptr);
++        original_image_ptr = nullptr;
++    }
++}
++
+ int capture_cvi_impl::stop_streaming()
+ {
+     int ret_val = 0;
+@@ -4175,6 +4257,7 @@ int capture_cvi_impl::close()
+     return ret_val;
+ }
+ 
++//interfaces
+ bool capture_cvi::supported()
+ {
+     if (!sys.ready)
+@@ -4235,9 +4318,21 @@ int capture_cvi::start_streaming()
+     return d->start_streaming();
+ }
+ 
+-int capture_cvi::read_frame(unsigned char* bgrdata)
+-{
+-    return d->read_frame(bgrdata);
++//added by jj
++int capture_cvi::read_frame(unsigned char* bgrdata, bool retain_image_ptr) {
++    return d->read_frame(bgrdata, retain_image_ptr);
++}
++
++void* capture_cvi::getImagePtr() {
++    return d->getImagePtr();
++}
++
++void* capture_cvi::getOriginalImagePtr() {
++    return d->getOriginalImagePtr();
++}
++
++void capture_cvi::releaseImagePtr() {
++    d->releaseImagePtr();
+ }
+ 
+ int capture_cvi::stop_streaming()
+@@ -4250,4 +4345,4 @@ int capture_cvi::close()
+     return d->close();
+ }
+ 
+-} // namespace cv
++} 
+\ No newline at end of file
+diff --git a/modules/highgui/src/capture_cvi.h b/modules/highgui/src/capture_cvi.h
+index e112912..8bfd0a0 100644
+--- a/modules/highgui/src/capture_cvi.h
++++ b/modules/highgui/src/capture_cvi.h
+@@ -38,16 +38,25 @@ public:
+ 
+     int start_streaming();
+ 
+-    int read_frame(unsigned char* bgrdata);
++    //modified by jj
++    int read_frame(unsigned char* bgrdata, bool retain_image_ptr);
+ 
+     int stop_streaming();
+ 
+     int close();
+ 
++    //added by jj
++    void* getImagePtr();
++    void* getOriginalImagePtr();
++    void releaseImagePtr();
++
+ private:
+     capture_cvi_impl* const d;
++    //added by jj
++    void* image_ptr;
++    void* original_image_ptr;
+ };
+ 
+ } // namespace cv
+ 
+-#endif // CAPTURE_CVI_H
++#endif // CAPTURE_CVI_H
+\ No newline at end of file
+diff --git a/modules/highgui/src/videocapture.cpp b/modules/highgui/src/videocapture.cpp
+index 7e33b03..ed4a398 100644
+--- a/modules/highgui/src/videocapture.cpp
++++ b/modules/highgui/src/videocapture.cpp
+@@ -19,6 +19,9 @@
+ 
+ #include <stdio.h>
+ #include <string.h>
++#include <iostream>
++
++//#define CV_WITH_CVI true
+ 
+ #if CV_WITH_CVI
+ #include "capture_cvi.h"
+@@ -239,6 +242,58 @@ void VideoCapture::release()
+     d->fps = 30;
+ }
+ 
++//added by jj
++std::pair<void*, void*> VideoCapture::capture(Mat& image) {
++    if (!d->is_opened)
++        return {};
++
++#if CV_WITH_AW
++    if (capture_v4l2_aw_isp::supported())
++    {
++        image.create(d->height, d->width, CV_8UC3);
++
++        d->cap_v4l2_aw_isp.read_frame((unsigned char*)image.data);
++    }
++    else
++#endif
++#if CV_WITH_RK
++    if (capture_v4l2_rk_aiq::supported())
++    {
++        image.create(d->height, d->width, CV_8UC3);
++
++        d->cap_v4l2_rk_aiq.read_frame((unsigned char*)image.data);
++    }
++    else
++#endif
++#if CV_WITH_CVI
++    if (capture_cvi::supported())
++    {
++        image.create(d->height, d->width, CV_8UC3);
++        d->cap_cvi.read_frame((unsigned char*)image.data, true);
++        void* image_ptr = d->cap_cvi.getImagePtr();
++        void* original_image_ptr = d->cap_cvi.getOriginalImagePtr();
++        return std::make_pair(image_ptr, original_image_ptr);
++    }
++    else
++#endif
++#if defined __linux__
++    if (capture_v4l2::supported())
++    {
++        image.create(d->height, d->width, CV_8UC3);
++
++        d->cap_v4l2.read_frame((unsigned char*)image.data);
++    }
++    else
++#endif
++    {
++    }
++    return {};
++}
++
++void VideoCapture::releaseImagePtr() {
++    return d->cap_cvi.releaseImagePtr();
++}
++
+ VideoCapture& VideoCapture::operator>>(Mat& image)
+ {
+     if (!d->is_opened)
+@@ -267,7 +322,7 @@ VideoCapture& VideoCapture::operator>>(Mat& image)
+     {
+         image.create(d->height, d->width, CV_8UC3);
+ 
+-        d->cap_cvi.read_frame((unsigned char*)image.data);
++        d->cap_cvi.read_frame((unsigned char*)image.data, false);
+     }
+     else
+ #endif
+@@ -282,7 +337,6 @@ VideoCapture& VideoCapture::operator>>(Mat& image)
+ #endif
+     {
+     }
+-
+     return *this;
+ }
+ 
+@@ -331,4 +385,4 @@ double VideoCapture::get(int propId) const
+     return 0.0;
+ }
+ 
+-} // namespace cv
++}
+\ No newline at end of file
